@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/tianu/catkin_ws/src/motionEstimationEKF-simplified-with-aruco/build/devel/setup.sh
