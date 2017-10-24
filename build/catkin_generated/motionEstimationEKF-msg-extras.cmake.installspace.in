@@ -1,2 +1,0 @@
-set(motionEstimationEKF_MESSAGE_FILES "msg/optical_flow_rad.msg")
-set(motionEstimationEKF_SERVICE_FILES "")

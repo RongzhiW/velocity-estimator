@@ -22,7 +22,6 @@
 #include "vicon.h"
 #include "uav_sensors.h"
 #include "uav_math.h"
-#include "aruco_tracker.h"
 
 using namespace std;
 using namespace Eigen;
@@ -36,11 +35,10 @@ class UavMotionEstimationEKF
 
 public:
     //constructor
-    UavMotionEstimationEKF(ros::NodeHandle *n, Vicon *viconTmp, UavSensors *sensorsTmp, ArucoTracker *arucoTrackerTmp){
+    UavMotionEstimationEKF(ros::NodeHandle *n, Vicon *viconTmp, UavSensors *sensorsTmp){
         nh=*n;
         viconObj=viconTmp;
         uavSensorsObj=sensorsTmp;
-        arucoTrackerObj=arucoTrackerTmp;
         setup();
     }
 
@@ -53,7 +51,6 @@ public:
     OpticalFlowData **OpticalFlowDatasArray;
     ViconPoint viconData;
     ViconPoint **viconPointArray;
-    ArucoTrackData arucoTrackData;
     int arraySize;
     int drift;
 
@@ -109,7 +106,7 @@ public:
     void correct(VectorXd z, VectorXd zhat, MatrixXd H, MatrixXd R, MatrixXd V);
     void correct_measurement(double t);
 
-    void getState(Vector2d& rp, Vector2d& gyroBias,Vector3d& bodyVel,double& height);
+    void getState(Vector3d& rp, Vector3d& gyroBias,Vector3d& acceBias,Vector3d& bodyVel,double& height,double& mx,double& my);
     double get_time(){return current_t;}
 
     bool processSensorData(double timeNow);
@@ -128,14 +125,17 @@ private:
     MatrixXd measurement_R;
 
     const Vector3d GRAVITY = Vector3d(0, 0, 9.8);
-    const int n_state = 6;
+    const int n_state = 15;
+    const int n_noiseQ = 14;
+    const int n_noiseR = 6;
+    const int n_meas = 6;
 
     Vector3d imuAcc;
     Vector3d bodyAngularVel;
 
     double current_t,start_t;
     bool imuEmpty,initialized,testFlag,coutOnceFlag;
-    double gyroBiasTuo;//gyro bias shift period
+    double gyroBiasTuo,acceBiasTuo;//gyro bias shift period
 
     ros::Publisher estiBodyVel_pub;
     ros::Publisher estiRPY_pub;
@@ -219,7 +219,6 @@ private:
     ros::NodeHandle nh;
     Vicon *viconObj;
     UavSensors *uavSensorsObj;
-    ArucoTracker *arucoTrackerObj;
     pthread_t read_tId,read_tIdSpin;
     uav_math *uavMathObj;
     bool setup();

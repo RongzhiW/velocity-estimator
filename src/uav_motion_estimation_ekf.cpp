@@ -1,26 +1,18 @@
 
 /*mediaSocUAV
- *
-  fuse optical_flow,sonar
+ * 磁力计，气压计融合加速度计、陀螺仪获得方位角和高度
   统一了代码风格
   移植到平台上
-  去除了姿态的估计，目前状态只有角速率的bias，XY速度，高度
-  使用aruco进行ground truth数据采集
+  添加了用于调试的一些topic
+  包含所有状态，共15哥，分别为三维姿态，陀螺仪bias，加速度bias,三维速度，高度，xy方向诱导系数
 */
 #include "uav_motion_estimation_ekf.h"
 #include <fstream>
 
+
 using namespace std;
-using namespace cv;
-using namespace aruco;
 
-VideoCapture videoCapturerObj;
-std::map<int,cv::Mat> aurcoTrackFramePose;//set of poses and the frames they were detected
-cv::Mat inputImage;
-
-//const char dir_path[] = "/home/tianu/Record";
 ofstream f1("/home/tianu/Record/motionEstimationData/mediaSocUAV/data.txt", ios::out);
-
 
 bool UavMotionEstimationEKF::setup(){
     if(!f1){
@@ -33,10 +25,11 @@ bool UavMotionEstimationEKF::setup(){
     uavMathObj=new uav_math();
 
     measFlowVxNoiseCovInit=0.00553;
-    measFlowVyNoiseCovInit=0.00553;//for bright_night in uav room 2
+    measFlowVyNoiseCovInit=0.00553;
     measFlowDistNoiseCovInit=0.00275;
+
     measImuAxtNoiseCov=0.01;
-    measImuAytNoiseCov=0.0107; // for bag 201612131519 pixhawk
+    measImuAytNoiseCov=0.0107;
 
     flowQualInitial=250.0;
     measFlowNoiseCovUpdateInterval=0;
@@ -47,25 +40,22 @@ bool UavMotionEstimationEKF::setup(){
     sumQual=0;
     processCounter=0;
     x=VectorXd::Zero(n_state);
-
-    dragForceParamX = -0.2748;
-    dragForceParamY = -0.2498;
+    x(13) = -0.2748;
+    x(14) = -0.2498;
 
     P=MatrixXd::Identity(n_state,n_state);
-    Q=MatrixXd::Zero(8,8);
-    Q(0,0)=0.0031;Q(1,1)=0.0031;
-    Q(2,2)=0.000006042;Q(3,3)=0.000006007;
-    Q(4,4)=0.5846;
-    Q(5,5)=0.27;
-    Q(6,6)=0.3319;
-    Q(7,7)=0.00275;
+    Q=MatrixXd::Zero(n_noiseQ,n_noiseQ);
+    Q(0,0)=0.0031;Q(1,1)=0.0031;Q(2,2)=0.0031;//convariance of angular velocity
+    Q(3,3)=0.000006042;Q(4,4)=0.000006007;Q(5,5)=0.000006007;//cov of gyrometer's bias
+    Q(6,6)=0.000006042;Q(7,7)=0.000006007;Q(8,8)=0.000006007;//cov of accelerometer's bias
+    Q(9,9)=0.5846;Q(10,10)=0.27;Q(11,11)=0.3319;//convariance of accelerometer
+    Q(12,12)=0.00000001;Q(13,13)=0.00000001;
 
-    measurement_R=MatrixXd::Zero(5,5);
-    measurement_R(0,0)=measImuAxtNoiseCov;
-    measurement_R(1,1)=measImuAytNoiseCov;
-    measurement_R(2,2) = measFlowVxNoiseCovInit;
-    measurement_R(3,3) = measFlowVyNoiseCovInit;
-    measurement_R(4,4) = measFlowDistNoiseCovInit;
+    measurement_R=MatrixXd::Zero(n_noiseR,n_noiseR);
+    measurement_R(0,0)=0.01;measurement_R(1,1)=0.0107;//cov of xy acc meas
+    measurement_R(2,2) = 0.00553;measurement_R(3,3) = 0.00553;//cov of optical-flow vel meas
+    measurement_R(4,4) = 0.75;//cov of yaw
+    measurement_R(5,5) = 0.00275;//cov of height;
 
     imuEmpty=true;
     initialized=false;
@@ -78,6 +68,7 @@ bool UavMotionEstimationEKF::setup(){
     useSonarRaw=true;useSonarKf=false;useSonarComp=false;
 
     gyroBiasTuo=100;
+    acceBiasTuo=100;
 
     estiBodyVel_pub = nh.advertise<geometry_msgs::Vector3>("/areodynamic_optical_flow/body_vel_1",10);
     estiRPY_pub = nh.advertise<geometry_msgs::Vector3>("/areodynamic_optical_flow/euler_angle_1",10);
@@ -145,13 +136,6 @@ bool UavMotionEstimationEKF::setup(){
     heightFromSonarCompFilted=0;
     velFromSonarCompFilted=0;
     sonarCompBias=0;
-
-    //aruco part
-    string videoPath="/home/tianu/catkin_ws/src/aruco-2.0.19/build/utils_markermap/test_mapper.avi";
-    videoCapturerObj.open(videoPath);
-    if(!videoCapturerObj.isOpened())throw std::runtime_error("open video failed");
-    videoCapturerObj >> inputImage;
-
     return 1;
 }
 
@@ -192,8 +176,7 @@ void UavMotionEstimationEKF::MotionEstiLoop(){
             updateSensorsAndVicon();
             imuDataStamp = imuData.timeStamp;
 
-            //if(abs(imuDataStamp-imuDataStampLast)>0.0001){
-            if(0){
+            if(abs(imuDataStamp-imuDataStampLast)>0.0001){
                 //************start EKF***************
                 double timeNow;
                 timeNow = ros::Time::now().toSec();
@@ -213,7 +196,7 @@ void UavMotionEstimationEKF::MotionEstiLoop(){
                 }
 
                 else{
-                    f1<<imuData.roll<<' '<<imuData.pitch<<' '<<x(2)<<' '<<x(3)<<' '<<x(4)<<' '<<viconData.roll<<' '<<viconData.pitch<<' '<<viconData.yaw<<' '<<viconData.vx<<\
+                    f1<<x(0)<<' '<<x(1)<<' '<<x(9)<<' '<<x(10)<<' '<<x(11)<<' '<<viconData.roll<<' '<<viconData.pitch<<' '<<viconData.yaw<<' '<<viconData.vx<<\
                                             ' '<<viconData.vy<<' '<<viconData.vz<<' '<<viconData.x<<' '<<viconData.y<<' '<<viconData.z<<' '<<imuData.roll<<' '<<imuData.pitch\
                                          <<' '<<imuData.yaw<<' '<<bodyVzFromSonar<<' '<<estiYawValue<<' '\
                                         <<opticalFlowData.opticalGlobal_x_m<<' '<<opticalFlowData.opticalGlobal_y_m<<\
@@ -222,12 +205,10 @@ void UavMotionEstimationEKF::MotionEstiLoop(){
                                         <<imuData.accelera_z<<' '<<viconData.ax<<' '<<viconData.ay<<' '<<viconData.az<<' '<<heightFromSonarKfFilted\
                                        <<' '<<viconData.worldVx<<' '<<viconData.worldVy<<' '<<viconData.worldVz<<' '<<opticalFlowData.opticalGlobal_vx<<' '\
                                       <<opticalFlowData.opticalGlobal_vy<<' '<<imuData.acceleraRaw_x<<' '<<imuData.acceleraRaw_y<<' '<<imuData.acceleraRaw_z<<' '\
-                                     <<opticalFlowData.distance<<' '<<x(5)<<' '<<worldVel[0]<<' '<<worldVel[1]<<' '<<worldVel[2]<<' '<<opticalFlowData.distanceRaw<<endl;
-
+                                     <<opticalFlowData.distance<<' '<<x(12)<<' '<<worldVel[0]<<' '<<worldVel[1]<<' '<<worldVel[2]<<' '<<opticalFlowData.distanceRaw<<endl;
                 }
-
-                cout<<"estiBodyVx:"<<x(2)<<" viconBodyVx:"<<viconData.vx<<" estiBodyVy:"<<x(3)<<" viconBodyVy:"<<viconData.vy<<" estiBodyVz:"<<x(4)\
-                   <<" viconBodyVz:"<<viconData.vz<<" gyroxBias:"<<x(0)<<" gyroyBias:"<<x(1)<<endl;
+                cout<<"estiBodyVx:"<<x(9)<<" viconBodyVx:"<<viconData.vx<<" estiBodyVy:"<<x(10)<<" viconBodyVy:"<<viconData.vy<<" estiBodyVz:"<<x(11)\
+                                   <<" viconBodyVz:"<<viconData.vz<<" yaw:"<<x(2)<<endl;
             }
             imuDataStampLast = imuDataStamp;
 
@@ -296,13 +277,13 @@ void UavMotionEstimationEKF::opticalFlowVelAndDistNoiseCovCb(const geometry_msgs
 
 void UavMotionEstimationEKF::motionModelAccNoiseCovCb(const geometry_msgs::Vector3 &msg){
     if(msg.x>0){
-        Q(4,4)=msg.x;
+        Q(9,9)=msg.x;
     }
     if(msg.y>0){
-        Q(5,5)=msg.y;
+        Q(10,10)=msg.y;
     }
     if(msg.z>0){
-        Q(6,6) = msg.z;
+        Q(11,11) = msg.z;
     }
     cout<<"x:"<<msg.x<<" y:"<<msg.y<<" z:"<<msg.z<<endl;
 }
@@ -354,9 +335,7 @@ void UavMotionEstimationEKF::MotionModelAngVelAndHeightNoiseCovCb(const geometry
     if(msg.y>0){
         Q(1,1)=msg.y;
     }
-    if(msg.z>0){
-        Q(7,7) = msg.z;
-    }
+
     cout<<"x:"<<msg.x<<" y:"<<msg.y<<" z:"<<msg.z<<endl;
 }
 
@@ -401,7 +380,7 @@ void UavMotionEstimationEKF::updateSensorsAndVicon(){
     imuAccRawPub.publish(imuAccRawDebug);
     imuAccPub.publish(imuAccDebug);
     imuRPYRawPub.publish(imuRPYdebug);
-    //cout<<"imuRoll:"<<imuRPYdebug.x<<" imuPitch:"<<imuRPYdebug.y<<" imuYaw:"<<imuRPYdebug.z<<endl;
+    cout<<"imuRoll:"<<imuRPYdebug.x<<" imuPitch:"<<imuRPYdebug.y<<" imuYaw:"<<imuRPYdebug.z<<endl;
     //***********************************************************
 
     //update optical_flow
@@ -501,27 +480,6 @@ void UavMotionEstimationEKF::updateSensorsAndVicon(){
     uav_01Mag.y = uavSensorsObj->uav_01Mag.y;
     uav_01Mag.z = uavSensorsObj->uav_01Mag.z;
 
-    //update aruco track result
-    if(videoCapturerObj.grab()){
-        videoCapturerObj.retrieve(inputImage);
-        //cv::imshow("origin",inputImage);
-        arucoTrackerObj->arucoTrackFunc(inputImage,aurcoTrackFramePose);
-        arucoTrackData.tx=arucoTrackerObj->arucoTrackData.tx;
-        arucoTrackData.ty=arucoTrackerObj->arucoTrackData.ty;
-        arucoTrackData.tz=arucoTrackerObj->arucoTrackData.tz;
-        arucoTrackData.qx=arucoTrackerObj->arucoTrackData.qx;
-        arucoTrackData.qy=arucoTrackerObj->arucoTrackData.qy;
-        arucoTrackData.qz=arucoTrackerObj->arucoTrackData.qz;
-        arucoTrackData.qw=arucoTrackerObj->arucoTrackData.qw;
-        arucoTrackData.roll=arucoTrackerObj->arucoTrackData.roll;
-        arucoTrackData.pitch=arucoTrackerObj->arucoTrackData.pitch;
-        arucoTrackData.yaw=arucoTrackerObj->arucoTrackData.yaw;
-        cout<<"tx:"<<arucoTrackData.tx<<" ty:"<<arucoTrackData.ty<<" tz:"<<arucoTrackData.tz\
-              <<" qx:"<<arucoTrackData.qx<<" qy:"<<arucoTrackData.qy<<" qz:"<<arucoTrackData.qz<<" qw:"<<arucoTrackData.qw\
-                <<" roll:"<<arucoTrackData.roll<<" pitch:"<<arucoTrackData.pitch<<" yaw:"<<arucoTrackData.yaw<<endl;
-    }
-
-
     //cout<<"bodyVel "<<"body_vx:"<<bodyVel[0]<<" body_vy:"<<bodyVel[1]<<" body_vz:"<<bodyVel[2]<<endl;
 
 }
@@ -532,7 +490,7 @@ void UavMotionEstimationEKF::predict(Vector3d gyro, Vector3d imuAcc,double t){
     double dt=t-start_t-current_t;
     VectorXd xdot(n_state);
     MatrixXd A(n_state,n_state);
-    MatrixXd W(n_state,8);
+    MatrixXd W(n_state,n_noiseQ);
 
     process(gyro,imuAcc,xdot,A,W);
 
@@ -545,84 +503,171 @@ void UavMotionEstimationEKF::predict(Vector3d gyro, Vector3d imuAcc,double t){
 }
 
 void UavMotionEstimationEKF::process(Vector3d gyro,Vector3d imuAcc,VectorXd& xdot, MatrixXd& A, MatrixXd& W){
-    Vector2d rp,gyroBias;
+    Vector3d rp,gyroBias,acceBias;
     Vector3d bodyVelTmp;
     double height;
-    getState(rp,gyroBias,bodyVelTmp,height);
+    double mu_x,mu_y;
+    getState(rp,gyroBias,acceBias,bodyVelTmp,height,mu_x,mu_y);
 
     xdot.setZero();
     A.setZero();
     W.setZero();
 
-    xdot(0)=-1/gyroBiasTuo*gyroBias(0);
-    xdot(1)=-1/gyroBiasTuo*gyroBias(1);
+    xdot(0)=(gyro(0)-gyroBias(0))+tan(rp(1))*sin(rp(0))*(gyro(1)-gyroBias(1))+tan(rp(1))*cos(rp(0))*(gyro(2)-gyroBias(2));
+    xdot(1)=cos(rp(0))*(gyro(1)-gyroBias(1))-sin(rp(0))*(gyro(2)-gyroBias(2));
+    if(abs(cos(rp(1)))>0.00001){
+        xdot(2)=(gyro(1)-gyroBias(1))*sin(rp(0))/cos(rp(1))+(gyro(2)-gyroBias(2))*cos(rp(0))/cos(rp(1));
+    }
+    else
+        xdot(2)=0;
 
-    xdot(2)=-GRAVITY(2)*sin(rp(1))+dragForceParamX*bodyVelTmp(0)+gyro(2)*bodyVelTmp(1)-(gyro(1)-gyroBias(1))*bodyVelTmp(2);
-    xdot(3)=GRAVITY(2)*cos(rp(1))*sin(rp(0))+dragForceParamY*bodyVelTmp(1)+(gyro(0)-gyroBias(0))*bodyVelTmp(2)-gyro(2)*bodyVelTmp(0);
-    xdot(4)=GRAVITY(2)*cos(rp(0))*cos(rp(1))+imuAcc(2)+(gyro(1)-gyroBias(1))*bodyVelTmp(0)-(gyro(0)-gyroBias(0))*bodyVelTmp(1);
+    xdot(3)=-1/gyroBiasTuo*gyroBias(0);
+    xdot(4)=-1/gyroBiasTuo*gyroBias(1);
+    xdot(5)=-1/gyroBiasTuo*gyroBias(2);
+
+    xdot(6)=-1/gyroBiasTuo*acceBias(0);
+    xdot(7)=-1/gyroBiasTuo*acceBias(1);
+    xdot(8)=-1/gyroBiasTuo*acceBias(2);
+
+    xdot(9)=-GRAVITY(2)*sin(rp(1))+mu_x*bodyVelTmp(0)+(gyro(2)-gyroBias(2))*bodyVelTmp(1)-(gyro(1)-gyroBias(1))*bodyVelTmp(2);
+    xdot(10)=GRAVITY(2)*cos(rp(1))*sin(rp(0))+mu_y*bodyVelTmp(1)+(gyro(0)-gyroBias(0))*bodyVelTmp(2)-(gyro(2)-gyroBias(2))*bodyVelTmp(0);
+    xdot(11)=GRAVITY(2)*cos(rp(0))*cos(rp(1))+imuAcc(2)-acceBias(2)+(gyro(1)-gyroBias(1))*bodyVelTmp(0)-(gyro(0)-gyroBias(0))*bodyVelTmp(1);
 
 //    xdot(7)=-sin(viconData.pitch)*bodyVelTmp(0)+cos(viconData.pitch)*sin(viconData.roll)*bodyVelTmp(1)+cos(viconData.pitch)*cos(viconData.roll)*bodyVelTmp(2);
-    xdot(5)=-sin(rp(1))*bodyVelTmp(0)+cos(rp(1))*sin(rp(0))*bodyVelTmp(1)+cos(rp(1))*cos(rp(0))*bodyVelTmp(2);
+    xdot(12)=-sin(rp(1))*bodyVelTmp(0)+cos(rp(1))*sin(rp(0))*bodyVelTmp(1)+cos(rp(1))*cos(rp(0))*bodyVelTmp(2);
 
+    xdot(13)=0;
+    xdot(14)=0;
 
-    A(0,0) = -1/gyroBiasTuo;
+    A(0,0)=-tan(rp(1))*sin(rp(0))*(gyro(2)-gyroBias(2))+tan(rp(1))*cos(rp(0))*(gyro(1)-gyroBias(1));
+    A(0,1)=1/(cos(rp(1))*cos(rp(1)))*(cos(rp(0))*(gyro(2)-gyroBias(2))+sin(rp(0))*(gyro(1)-gyroBias(1)));
+    A(0,3)=-1;
+    A(0,4)=-tan(rp(1))*sin(rp(0));
+    A(0,5)=-tan(rp(1))*cos(rp(0));
 
-    A(1,1) = -1/gyroBiasTuo;
+    A(1,0)=-sin(rp(0))*(gyro(1)-gyroBias(1))-cos(rp(0))*(gyro(2)-gyroBias(2));
+    A(1,4)=-cos(rp(0));
+    A(1,5)=sin(rp(0));
 
-    A(2,1) = bodyVelTmp(2);
-    A(2,2) = dragForceParamX;
-    A(2,3) = gyro(2);
-    A(2,4) = -(gyro(1)-gyroBias(1));
+    if(abs(cos(rp(1)))>0.00001){
+        A(2,0)=(gyro(1)-gyroBias(1))*cos(rp(0))/cos(rp(1))-(gyro(2)-gyroBias(2))*sin(rp(0))/cos(rp(1));
+        A(2,1)=((gyro(1)-gyroBias(1))*sin(rp(0))*sin(rp(1))+(gyro(2)-gyroBias(2))*cos(rp(0))*sin(rp(1)))/(cos(rp(1))*cos(rp(1)));
+        A(2,4)=-sin(rp(0))/cos(rp(1));
+        A(2,5)=-cos(rp(0))/cos(rp(1));
+    }
+    else{
+        A(2,0)=0;
+        A(2,1)=0;
+        A(2,4)=0;
+        A(2,5)=0;
+    }
 
-    A(3,0) = -bodyVelTmp(2);
-    A(3,2) = -gyro(2);
-    A(3,3) = dragForceParamY;
-    A(3,4) = (gyro(0)-gyroBias(0));
+    A(3,3)=-1/gyroBiasTuo;
+    A(4,4)=-1/gyroBiasTuo;
+    A(5,5)=-1/gyroBiasTuo;
 
-    A(4,0) = bodyVelTmp(1);
-    A(4,1) = -bodyVelTmp(0);
-    A(4,2) = gyro(1)-gyroBias(1);
-    A(4,3) = -(gyro(0)-gyroBias(0));
+    A(6,6)=-1/acceBiasTuo;
+    A(7,7)=-1/acceBiasTuo;
+    A(8,8)=-1/acceBiasTuo;
 
-    A(5,2) = -sin(rp(1));
-    A(5,3) = cos(rp(1))*sin(rp(0));
-    A(5,4) = cos(rp(1))*cos(rp(0));
+    A(9,1)=-GRAVITY(2)*cos(rp(1));
+    A(9,4)=bodyVelTmp(2);
+    A(9,5)=-bodyVelTmp(1);
+    A(9,9)=mu_x;
+    A(9,10)=(gyro(2)-gyroBias(2));
+    A(9,11)=-(gyro(1)-gyroBias(1));
+    A(9,13)=bodyVelTmp(0);
 
-    W.block<4,4>(0,2)=Matrix4d::Identity();
-    W(2,1) = -bodyVelTmp(2);
-    W(3,0) = bodyVelTmp(2);
+    A(10,0)=GRAVITY(2)*cos(rp(1))*cos(rp(0));
+    A(10,1)=-GRAVITY(2)*sin(rp(1))*cos(rp(0));
+    A(10,3)=-bodyVelTmp(2);
+    A(10,5)=bodyVelTmp(0);
+    A(10,9)=-(gyro(2)-gyroBias(2));
+    A(10,10)=mu_y;
+    A(10,11)=gyro(0)-gyroBias(0);
+    A(10,14)=bodyVelTmp(1);
 
-    W(4,0) = -bodyVelTmp(1);
-    W(4,1) = bodyVelTmp(0);
-    W(4,6) = 1;
+    A(11,0)=-GRAVITY(2)*cos(rp(1))*sin(rp(0));
+    A(11,1)=-GRAVITY(2)*sin(rp(1))*cos(rp(0));
+    A(11,3)=bodyVelTmp(1);
+    A(11,4)=-bodyVelTmp(0);
+    A(11,8)=-1;
+    A(11,9)=gyro(1)-gyroBias(1);
+    A(11,10)=-(gyro(0)-gyroBias(0));
 
-    W(5,7) = 1;
+    A(12,0)=cos(rp(1))*cos(rp(0))*bodyVelTmp(1)-cos(rp(1))*sin(rp(0))*bodyVelTmp(2);
+    A(12,1)=-cos(rp(1))*bodyVelTmp(0)-sin(rp(1))*sin(rp(0))*bodyVelTmp(1)-sin(rp(1))*cos(rp(0))*bodyVelTmp(2);
+    A(12,9)=-sin(rp(1));
+    A(12,10)=cos(rp(1))*sin(rp(0));
+    A(12,11)=cos(rp(1))*cos(rp(0));
+
+    W(0,0)=1;
+    W(0,1)=tan(rp(1))*sin(rp(0));
+    W(0,2)=tan(rp(1))*cos(rp(0));
+
+    W(1,1)=cos(rp(0));
+    W(1,2)=-sin(rp(0));
+
+    W(2,1)=sin(rp(0))/cos(rp(1));
+    W(2,2)=cos(rp(0))/cos(rp(1));
+
+    W.block<4,4>(3,3)=Matrix4d::Identity();
+    W(7,7)=1;
+    W(8,8)=1;
+
+    W(9,1)=-bodyVelTmp(2);
+    W(9,2)=bodyVelTmp(1);
+
+    W(10,0)=bodyVelTmp(2);
+    W(10,2)=bodyVelTmp(0);
+
+    W(11,0)=-bodyVelTmp(1);
+    W(11,1)=bodyVelTmp(0);
+
+    W(13,12)=1;
+    W(14,13)=1;
+
 }
 
-void UavMotionEstimationEKF::getState(Vector2d& rp, Vector2d& gyroBias,Vector3d& bodyVelTmp,double& height){
-    rp(0)=imuData.roll;
-    rp(1)=imuData.pitch;
-    gyroBias=x.segment<2>(0);
-    bodyVelTmp=x.segment<3>(2);
-    height=x(5);
+void UavMotionEstimationEKF::getState(Vector3d& rp, Vector3d& gyroBias,Vector3d& acceBias,Vector3d& bodyVelTmp,double& height,double& mx,double& my){
+    rp=x.segment<3>(0);
+    gyroBias=x.segment<3>(3);
+    acceBias=x.segment<3>(6);
+    bodyVelTmp=x.segment<3>(9);
+    height=x(12);
+    mx=x(13);
+    my=x(14);
 }
 
 void UavMotionEstimationEKF::measurement(VectorXd& zhat, Vector3d gyro, MatrixXd &H, MatrixXd &V){
-        zhat=VectorXd::Zero(5);
-        zhat(0)=dragForceParamX*x(2);
-        zhat(1)=dragForceParamY*x(3);
-        zhat(2)=x(2);
-        zhat(3)=x(3);
-        zhat(4)=x(5);
+        double mu_x=x(13);
+        double mu_y=x(14);
+        double acceBiasX=x(6);
+        double acceBiasY=x(7);
+        zhat=VectorXd::Zero(n_meas);
+        zhat(0)=mu_x*x(9)+acceBiasX;//acc x
+        zhat(1)=mu_y*x(10)+acceBiasY;//acc y
+        zhat(2)=x(9);//vx
+        zhat(3)=x(10);//vy
+        zhat(4)=x(2);//yaw
+        zhat(5)=x(12);//height
 
-        H=MatrixXd::Zero(5,n_state);
-        H(0,2)=dragForceParamX;
-        H(1,3)=dragForceParamY;
-        H(2,2)=1;
-        H(3,3)=1;
-        H(4,5)=1;
+        H=MatrixXd::Zero(n_meas,n_state);
+        H(0,6)=1;
+        H(0,9)=mu_x;
 
-        V=MatrixXd::Identity(5,5);
+        H(1,7)=1;
+        H(1,10)=mu_y;
+
+        H(2,9)=1;
+
+        H(3,10)=1;
+
+        H(4,2)=1;
+
+        H(5,12)=1;
+
+        V=MatrixXd::Identity(n_noiseR,n_noiseR);
 }
 
 void UavMotionEstimationEKF::correct(VectorXd z, VectorXd zhat, MatrixXd H, MatrixXd R, MatrixXd V)
@@ -638,25 +683,25 @@ void UavMotionEstimationEKF::correct_measurement(double t){
     predict(this->bodyAngularVel,this->imuAcc,t);
     double dt=t-start_t-current_t;
     //cout<<"dt:"<<dt<<endl;
-    VectorXd z=VectorXd::Zero(5);
-    //there is a constant bias between imu and vicon
-    double axBias=-0.1820;
-    double ayBias=0;
-    z(0)=this->imuAcc(0)-axBias;
-    z(1)=this->imuAcc(1)-ayBias;
+    VectorXd z=VectorXd::Zero(n_meas);
+
+    z(0)=this->imuAcc(0);
+    z(1)=this->imuAcc(1);
     z(2)=opticalFlowData.opticalLocal_vx;
     z(3)=opticalFlowData.opticalLocal_vy;
+    z(4)=estiYawValue;
+    //z(4)=imuData.yaw;
     if(useSonarRaw){
-        z(4)=-opticalFlowData.distance;
+        z(5)=-opticalFlowData.distance;
 //        cout<<"measure mode 4"<<endl;
     }else if(useSonarKf){
-        z(4)=heightFromSonarKfFilted;
+        z(5)=heightFromSonarKfFilted;
 //        cout<<"measure mode 5"<<endl;
     }else if(useSonarComp){
-        z(4)=heightFromSonarCompFilted;
+        z(5)=heightFromSonarCompFilted;
 //        cout<<"measure mode 6"<<endl;
     }else{
-        z(4)=-opticalFlowData.distance;
+        z(5)=-opticalFlowData.distance;
 //        cout<<"measure mode 4"<<endl;
     }
 
@@ -811,7 +856,7 @@ void UavMotionEstimationEKF::calcuBodyVz(){
     float R_NED[9];
     uavMathObj->eulertoRotation(rollTmp,pitchTmp,yawTmp,R_NED);
     if(useSonarComp){
-        bodyVzFromSonar = (velFromSonarCompFilted-R_NED[6]*x(2)-R_NED[7]*x(3))/R_NED[8];
+        bodyVzFromSonar = (velFromSonarCompFilted-R_NED[6]*x(9)-R_NED[7]*x(10))/R_NED[8];
     }else if(useSonarRaw){
         bodyVzFromSonar = opticalFlowData.opticalLocal_vz;
     }
@@ -825,8 +870,8 @@ void UavMotionEstimationEKF::autoAdaptEstiVel(){
     double qualityTmp=opticalFlowData.quality;
 //    qualityTmp=qualHighThresh-10;
     if(averageQual<qualHighThresh){
-        bodyVel[0] = x(2);
-        bodyVel[1] = x(3);
+        bodyVel[0] = x(9);
+        bodyVel[1] = x(10);
 //        bodyVel[2] = x(6);
         if(useSonarRaw){
             bodyVel[2] = opticalFlowData.opticalLocal_vz;
@@ -844,16 +889,16 @@ void UavMotionEstimationEKF::autoAdaptEstiVel(){
         bodyVel[0] = x(2);
         bodyVel[1] = x(3);
         if(useSonarRaw){
-            bodyVel[2] = flowWeight*opticalFlowData.opticalLocal_vz+(1-flowWeight)*x(4);
+            bodyVel[2] = flowWeight*opticalFlowData.opticalLocal_vz+(1-flowWeight)*x(11);
         }else if(useSonarComp){
-            bodyVel[2] = flowWeight*bodyVzFromSonar+(1-flowWeight)*x(4);
+            bodyVel[2] = flowWeight*bodyVzFromSonar+(1-flowWeight)*x(11);
         }
         else{
-            bodyVel[2] = flowWeight*opticalFlowData.opticalLocal_vz+(1-flowWeight)*x(4);
+            bodyVel[2] = flowWeight*opticalFlowData.opticalLocal_vz+(1-flowWeight)*x(11);
         }
 
     }
-    if(abs(x(2))<velLowThresh && abs(x(3))<velLowThresh && averageQual<qualLowThresh){
+    if(abs(x(9))<velLowThresh && abs(x(10))<velLowThresh && averageQual<qualLowThresh){
         if(coutOnceFlag){
             //cout<<"danger state, low optical_flow quality and low velocity!"<<endl;
             coutOnceFlag=false;
@@ -900,13 +945,8 @@ void UavMotionEstimationEKF::calculatePath(double dt){
     worldPoseX += worldVelNEU[0]*dt;
     worldPoseY += worldVelNEU[1]*dt;
     worldPoseZ += worldVelNEU[2]*dt;
-//    worldPoseX += worldVel[0]*dt;
-//    worldPoseY += worldVel[1]*dt;
-//    worldPoseZ += worldVel[2]*dt;
+
 //    cout<<"posex:"<<worldVel[0]<<' '<<"posey:"<<worldVel[1]<<' '<<"posez:"<<worldVel[2]<<endl;
-
-
-    //cout<<"dt:"<<dt<<" worldVelX:"<<worldVel[0]<<" worldVelY:"<<worldVel[1]<<" worldVelZ:"<<worldVel[2]<<endl;
 
 }
 
@@ -996,7 +1036,7 @@ void UavMotionEstimationEKF::publishHeightFromSonar(){
 //    heightOfSonar.y = opticalFlowData.opticalLocal_vz;
 //    heightOfSonar.y = imuData.acceleraRaw_x/dragForceParamX;
 //    heightOfSonar.z = viconData.vz;
-    heightOfSonar.x = x(5);
+    heightOfSonar.x = x(12);
     heightOfSonar.y = -opticalFlowData.distance;
     heightOfSonar.z = viconData.z;
     //heightOfSonar.z = heightFromBaroKfFilted;
@@ -1063,11 +1103,11 @@ bool UavMotionEstimationEKF::processSensorData(double timeNow){
             sonarKfFilter();
             sonarCompFilter(dt);
             calcuBodyVz();
-//            magKfFilter();
-//            calcuYawFromMag();
-//            estiYawKf(dt);
-//            baroKfFilter();
-//            baroCompFilter(dt);
+            magKfFilter();
+            calcuYawFromMag();
+            estiYawKf(dt);
+            baroKfFilter();
+            baroCompFilter(dt);
             correct_measurement(t);
             autoAdaptEstiVel();
             calculatePath(dt);

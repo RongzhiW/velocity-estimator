@@ -27,10 +27,9 @@ int main(int argc, char** argv){
 
     Vicon *viconNode=new Vicon(&node);
     UavSensors *uavSensorsNode=new UavSensors(&node,viconNode);
-    ArucoTracker *arucoTrackerNode=new ArucoTracker(&node);
 
     ROS_INFO("motionEstimationEKF start!");
-    UavMotionEstimationEKF *motionEstiEKF=new UavMotionEstimationEKF(&node,viconNode,uavSensorsNode,arucoTrackerNode);
+    UavMotionEstimationEKF *motionEstiEKF=new UavMotionEstimationEKF(&node,viconNode,uavSensorsNode);
     motionEstiEKF->startMotionEstiLoop();
     motionEstiEKF->startSpinOnceLoop();
 

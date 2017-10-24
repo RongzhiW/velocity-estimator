@@ -8,8 +8,6 @@ cmake_minimum_required(VERSION 2.8)
 #set(ardrone_autonomy_DIR /home/tianu/onlyCatkin_ws/devel/share/ardrone_autonomy/cmake)
 
 #set(CMAKE_MODULE_PATH /home/mrh/ProgramsFiles/eigen/cmake)
-SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_INSTALL_PREFIX}/lib/cmake/ /usr/lib/cmake)
-SET(CMAKE_CXX_FLAGS "-std=c++0x")
 
 find_package(Eigen3 REQUIRED)
 
@@ -25,18 +23,13 @@ find_package(catkin REQUIRED
   #vicon_bridge
 )
 
-find_package(OpenCV REQUIRED)
-find_package(aruco REQUIRED)
-SET(REQUIRED_LIBRARIES ${REQUIRED_LIBRARIES} ${OpenCV_LIBS} ${aruco_LIBS}  )
-
 include_directories(
 ${PROJECT_SOURCE_DIR}/../../devel/include/motionEstimationEKF
 ${vicon_bridge_INCLUDE_DIRS}
 ${EIGEN3_INCLUDE_DIR}
 ${catkin_INCLUDE_DIRS}
-
 )
-message("hello ${CMAKE_INSTALL_PREFIX}")
+message("hello ${PROJECT_SOURCE_DIR}")
 
 #add_definitions(${GeographicLib_DEFINITIONS})
 ## System dependencies are found with CMake's conventions
@@ -76,6 +69,7 @@ message("hello ${CMAKE_INSTALL_PREFIX}")
  add_message_files(
    FILES
    optical_flow_rad.msg
+   velocityMsg.msg
  )
 
 ## Generate services in the 'srv' folder
@@ -142,15 +136,12 @@ add_executable(UavMotionEstimationEKF
                 src/uav_sensors.cpp
                 src/uav_math.cpp
                 src/uav_motion_estimation_ekf.cpp
-                src/aruco_tracker.cpp
-                src/aruco_tracker.h
 )
 
 target_link_libraries(UavMotionEstimationEKF
                 ${catkin_LIBRARIES}
                 ${EIGEN_LIBRARIES}
     		${GeographicLib_LIBRARIES}
-                ${REQUIRED_LIBRARIES}
                 )
 
 ###########
