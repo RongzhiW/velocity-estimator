@@ -18,7 +18,6 @@ bool UavSensors::setup(){
     imu_sub = nh.subscribe(imu_topic_name, 1, &UavSensors::imuCb,this);
     uav_01BaroSub = nh.subscribe("/mavros/imu/atm_pressure",1,&UavSensors::uav_01BaroCb,this);
     uav_01MagSub = nh.subscribe("/mavros/imu/mag",1,&UavSensors::uav_01MagCb,this);
-    uav_01MagSub = nh.subscribe("/mavros/imu/mag",1,&UavSensors::uav_01MagCb,this);
 
     uavMathObj = new uav_math();
     uavMathObj->eulertoQ(M_PI,0,0,qNED_NWU);
